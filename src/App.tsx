@@ -54,8 +54,8 @@ export default function App() {
 
   useEffect(() => { profile.setDifficulty(difficulty) }, [difficulty])
 
-  const rowFilled = useMemo(() => grid.map(row => row.reduce((a, v) => a + (v === 1 ? 1 : 0), 0)), [grid])
-  const colFilled = useMemo(() => Array.from({ length: cfg.size }, (_, c) => grid.reduce((a, row) => a + (row[c] === 1 ? 1 : 0), 0)), [grid, cfg.size])
+  const rowFilled = useMemo(() => grid.map(row => row.reduce<number>((a, v) => a + (v === 1 ? 1 : 0), 0)), [grid])
+  const colFilled = useMemo(() => Array.from({ length: cfg.size }, (_, c) => grid.reduce<number>((a, row) => a + (row[c] === 1 ? 1 : 0), 0)), [grid, cfg.size])
 
   // counts-based solved check
   const countsOk = useMemo(() => (
@@ -121,7 +121,7 @@ export default function App() {
         }
       }
     }
-    const colNow = Array.from({ length: cfg.size }, (_, c) =>next.reduce((a, row) => a + (row[c] === 1 ? 1 : 0), 0))
+    const colNow = Array.from({ length: cfg.size }, (_, c) => next.reduce<number>((a, row) => a + (row[c] === 1 ? 1 : 0), 0))   
     for (let c = 0; c < cfg.size; c++) {
       const need = puzzle.colCounts[c]
       let have = colNow[c]
