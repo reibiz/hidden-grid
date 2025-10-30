@@ -1,0 +1,22 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root { height: 100%; }
+
+:root {
+  --bg: #0b0b10;
+  --panel: #11121a;
+  --text: #e8e8f0;
+  --accent: #10b981;
+  --accent2: #60a5fa;
+}
+.theme-retro { --bg:#000010; --panel:#050520; --text:#f0f0d0; --accent:#00ffcc; --accent2:#cc66ff; font-family: "Press Start 2P", monospace; }
+.theme-zen { --bg:#faf9f7; --panel:#ffffff; --text:#111827; --accent:#10b981; --accent2:#60a5fa; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+
+body { background: var(--bg); color: var(--text); }
+.panel { background-color: color-mix(in oklab, var(--panel) 95%, black); }
+.border-accent { border-color: color-mix(in oklab, var(--accent) 40%, transparent); }
+.btn { padding: 0.5rem 0.75rem; border-radius: 0.5rem; border-width: 1px; transition: all 150ms; }
+.btn-accent { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.btn-neutral { background: color-mix(in oklab, var(--panel) 85%, transparent); border-color: color-mix(in oklab, var(--text) 20%, transparent); }
