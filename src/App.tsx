@@ -1,236 +1,300 @@
-import { useEffect, useMemo, useState } from 'react'
-import { mulberry32, hashStringToSeed, todayKey } from './lib/seed'
-import { DIFFICULTY_CONFIG, type DifficultyKey as Difficulty, computeMedal, computeXP, type Medal, levelFromXP, titleForLevel } from './lib/progression'
+/**
+ * App
+ *
+ * Thin orchestrator for a single game session.
+ *
+ * Responsibilities:
+ *   1. Wire hooks (game state, profile, sound, animations, completion)
+ *   2. Compose sound + action into single callbacks for child components
+ *   3. Render the layout shell and delegate all visual work to components
+ *
+ * GameHeader     → title, streak, XP bar, back button, settings gear
+ * GameBoard      → clue headers + interactive cell grid
+ * GameControls   → Reveal / Reset buttons + live timer
+ * GameSidebar    → difficulty selector + puzzle stats (desktop only)
+ * CompletionModal / SettingsModal → overlays
+ */
+
+import { useCallback, useEffect, useState } from 'react'
+import { type DifficultyKey, levelFromXP, titleForLevel } from './lib/progression'
+import { type PuzzlePicture, puzzleFromPicture, SIZE_TO_DIFFICULTY } from './lib/puzzlePictures'
 import { useProfile } from './hooks/useProfile'
-import { XpBar } from './components/XpBar'
+import { useGameState, type CellState, type Puzzle } from './hooks/useGameState'
+import { useGameCompletion } from './hooks/useGameCompletion'
+import { useSound } from './hooks/useSound'
+import { useAnimations } from './hooks/useAnimations'
+import { GameHeader } from './components/GameHeader'
+import { GameBoard } from './components/GameBoard'
+import { GameControls } from './components/GameControls'
+import { GameSidebar } from './components/GameSidebar'
 import { CompletionModal } from './components/CompletionModal'
-import { StatsPanel } from './components/StatsPanel'
 import { SettingsModal } from './components/SettingsModal'
-import { updateStreak } from './lib/streak'
-import { recordSolve } from './lib/stats'
-import { evaluateAchievements } from './lib/achievements'
+import { ParticleEffect } from './components/ParticleEffect'
 import './index.css'
 
-type CellState = 0 | 1 | 2
-interface Puzzle { id: string; size: number; solution: boolean[][]; rowCounts: number[]; colCounts: number[] }
-
-function generatePuzzle(seed: string, size = 8, density = 0.45): Puzzle {
-  const rng = mulberry32(hashStringToSeed(seed))
-  const solution: boolean[][] = Array.from({ length: size }, () => Array.from({ length: size }, () => rng() < density))
-  for (let r = 0; r < size; r++) if (solution[r].every(v => !v)) { solution[r][Math.floor(rng() * size)] = true }
-  for (let c = 0; c < size; c++) if (solution.every(row => !row[c])) { solution[Math.floor(rng() * size)][c] = true }
-  const rowCounts = solution.map(row => row.reduce((a, b) => a + (b ? 1 : 0), 0))
-  const colCounts = Array.from({ length: size }, (_, c) => solution.reduce((a, row) => a + (row[c] ? 1 : 0), 0))
-  return { id: seed, size, solution, rowCounts, colCounts }
+interface AppProps {
+  initialDifficultyOverride?: DifficultyKey
+  initialPicture?: PuzzlePicture   // picture mode: use this specific puzzle
+  onReturnToMenu?: () => void
 }
 
-export default function App() {
+export default function App({
+  initialDifficultyOverride,
+  initialPicture,
+  onReturnToMenu,
+}: AppProps = {}) {
+
+  // ── Profile + initial settings ──────────────────────────────────────────────
   const profile = useProfile()
-  const p0 = profile.get()
-  const initialDifficulty = p0.settings.difficulty
-  const [mode, setMode] = useState<'daily' | 'practice'>('daily')
-  const [difficulty, setDifficulty] = useState<Difficulty>(initialDifficulty)
-  const cfg = DIFFICULTY_CONFIG[difficulty]
 
-  const [seed, setSeed] = useState(() => `daily-${todayKey()}-${difficulty}`)
-  const [puzzle, setPuzzle] = useState<Puzzle>(() => generatePuzzle(seed, cfg.size, cfg.density))
-  const [grid, setGrid] = useState<CellState[][]>(() => Array.from({ length: cfg.size }, () => Array(cfg.size).fill(0)))
-  const [moves, setMoves] = useState(0)
-  const [startTime, setStartTime] = useState(() => Date.now())
-  const [revealCount, setRevealCount] = useState(0)
-  const [modalOpen, setModalOpen] = useState(false)
-  const [settingsOpen, setSettingsOpen] = useState(false)
-  const [showStats, setShowStats] = useState(false)
-  const [lastResult, setLastResult] = useState<{ seconds: number; medal: Medal; gainedXP: number; levelUp: { from: number; to: number } | null; dailyBonus?: number; newlyUnlocked?: string[] } | null>(null)
+  // Derive difficulty and optional fixed puzzle from initialPicture when present
+  const fixedPuzzle: Puzzle | undefined = initialPicture
+    ? puzzleFromPicture(initialPicture)
+    : undefined
+  const initialDifficulty: DifficultyKey = initialPicture
+    ? SIZE_TO_DIFFICULTY[initialPicture.size]
+    : (initialDifficultyOverride ?? profile.get().settings.difficulty)
+
+  // ── Game engine ─────────────────────────────────────────────────────────────
+  const {
+    difficulty,
+    config: cfg,
+    seed,
+    puzzle,
+    grid,
+    moves,
+    startTime,
+    rowFilled,
+    colFilled,
+    countsMatch,
+    canUndo,
+    canRedo,
+    cycleCell,
+    undo,
+    redo,
+    revealMistakes,
+    resetBoard,
+    updateDifficulty,
+    startNewPuzzle,
+  } = useGameState(initialDifficulty, fixedPuzzle)
+
+  // ── Audio ───────────────────────────────────────────────────────────────────
+  const soundEnabled = profile.get().settings.sound !== false
+  const sound = useSound(soundEnabled)
 
   useEffect(() => {
-    const p = generatePuzzle(seed, cfg.size, cfg.density)
-    setPuzzle(p)
-    setGrid(Array.from({ length: cfg.size }, () => Array(cfg.size).fill(0)))
-    setMoves(0)
-    setStartTime(Date.now())
-    setRevealCount(0)
-  }, [seed, difficulty])
+    if (soundEnabled) sound.preloadAll()
+  }, [soundEnabled, sound])
 
-  useEffect(() => { profile.setDifficulty(difficulty) }, [difficulty])
-
-  const rowFilled = useMemo(() => grid.map(row => row.reduce<number>((a, v) => a + (v === 1 ? 1 : 0), 0)), [grid])
-  const colFilled = useMemo(() => Array.from({ length: cfg.size }, (_, c) => grid.reduce<number>((a, row) => a + (row[c] === 1 ? 1 : 0), 0)), [grid, cfg.size])
-
-  // counts-based solved check
-  const countsOk = useMemo(() => (
-    puzzle.rowCounts.every((v, i) => v === rowFilled[i]) && puzzle.colCounts.every((v, i) => v === colFilled[i])
-  ), [puzzle, rowFilled, colFilled])
-
+  // ── Timer — tick every second so the display stays live ─────────────────────
+  const [, setTick] = useState(0)
   useEffect(() => {
-    if (!countsOk) return
-    const seconds = Math.floor((Date.now() - startTime) / 1000)
-    const medal = computeMedal(difficulty, seconds)
-    const perfect = true
-    const gainedXP = computeXP({ size: cfg.size, difficulty, seconds, perfect })
-
-    const today = todayKey()
-    const isDaily = seed.startsWith('daily-')
-    let dailyBonus = 0
-    if (isDaily && (profile.get().lastDailyBonusDate !== today)) dailyBonus = 25
-    if (isDaily) {
-      const st = updateStreak(profile.get().streak, today)
-      profile.setStreak(st)
-      if (dailyBonus > 0) profile.setLastDailyBonusDate(today)
-    }
-    const p = profile.get()
-    const newStats = recordSolve(p.stats, difficulty, seconds, perfect, medal)
-    profile.setStats(newStats)
-    const evalRes = evaluateAchievements(p.achievements, {
-      difficulty, seconds, medal, perfect, dateISO: new Date().toISOString(),
-      currentStreak: p.streak.current,
-      solvedByDifficulty: newStats.solvesByDifficulty
-    })
-    profile.setAchievements(evalRes.updated)
-    const before = levelFromXP(profile.get().xp)
-    profile.addXP(gainedXP + dailyBonus)
-    profile.incrementSolved()
-    if (medal !== 'none') profile.addMedal(medal)
-    const after = levelFromXP(profile.get().xp)
-    const levelUp = after.level > before.level ? { from: before.level, to: after.level } : null
-    setModalOpen(true)
-    setLastResult({ seconds, medal, gainedXP: gainedXP + dailyBonus, levelUp, dailyBonus: dailyBonus || undefined, newlyUnlocked: evalRes.newlyUnlocked })
-  }, [countsOk])
-
-  function cycleCell(r: number, c: number, rightClick = false) {
-    setGrid(g => {
-      const next = g.map(row => row.slice())
-      const cur = next[r][c]
-      let n: CellState
-      if (rightClick) n = cur === 2 ? 0 : 2
-      else n = cur === 1 ? 0 : 1
-      next[r][c] = n
-      return next
-    })
-    setMoves(m => m + 1)
-  }
-
-  function revealMistakes() {
-    const next = grid.map(row => row.slice())
-    for (let r = 0; r < cfg.size; r++) {
-      const need = puzzle.rowCounts[r]
-      let have = rowFilled[r]
-      if (have > need) {
-        for (let c = 0; c < cfg.size && have > need; c++) {
-          if (next[r][c] === 1) { next[r][c] = 0; have-- }
-        }
-      }
-    }
-    const colNow = Array.from({ length: cfg.size }, (_, c) => next.reduce<number>((a, row) => a + (row[c] === 1 ? 1 : 0), 0))   
-    for (let c = 0; c < cfg.size; c++) {
-      const need = puzzle.colCounts[c]
-      let have = colNow[c]
-      if (have > need) {
-        for (let r = 0; r < cfg.size && have > need; r++) {
-          if (next[r][c] === 1) { next[r][c] = 0; have-- }
-        }
-      }
-    }
-    setGrid(next)
-    setRevealCount(n => n + 1)
-  }
-
-  function newDaily() { setMode('daily'); setSeed(`daily-${todayKey()}-${difficulty}`) }
-  function newPractice() { setMode('practice'); setSeed(`practice-${Math.random().toString(36).slice(2, 10)}-${difficulty}`) }
-
-  const settings = profile.get().settings
+    const id = setInterval(() => setTick(t => t + 1), 1000)
+    return () => clearInterval(id)
+  }, [startTime]) // restart interval whenever a new puzzle begins
   const secondsElapsed = Math.floor((Date.now() - startTime) / 1000)
+
+  // ── Animations + per-row/col completion sounds ──────────────────────────────
+  const { completedRows, completedCols, puzzleComplete, showParticles } =
+    useAnimations({ rowFilled, colFilled, puzzle, countsMatch, seed, sound })
+
+  // ── Completion modal ─────────────────────────────────────────────────────────
+  const completion = useGameCompletion({
+    countsMatch,
+    startTime,
+    difficulty,
+    size: cfg.size,
+    seed,
+    profile,
+  })
+
+  useEffect(() => {
+    if (completion.result?.levelUp) sound.playSound('level-up')
+  }, [completion.result?.levelUp, sound])
+
+  // Mark picture as solved the first time the completion modal opens
+  useEffect(() => {
+    if (completion.isOpen && initialPicture) {
+      profile.markPictureSolved(initialPicture.id)
+    }
+  }, [completion.isOpen, initialPicture, profile])
+
+  // ── UI state ─────────────────────────────────────────────────────────────────
+  const [settingsOpen, setSettingsOpen] = useState(false)
+
+  // Persist chosen difficulty to profile whenever it changes mid-game
+  useEffect(() => {
+    profile.setDifficulty(difficulty)
+  }, [difficulty, profile])
+
+  // ── Derived display values ───────────────────────────────────────────────────
   const level = levelFromXP(profile.get().xp)
   const title = titleForLevel(level.level)
   const streak = profile.get().streak
-  const panelClass = 'panel border border-accent rounded-2xl p-4'
+  const settings = profile.get().settings
+
+  // ── Wired callbacks — sound + action composed here, children stay pure ───────
+
+  const handleCellClick = useCallback(
+    (r: number, c: number, currentState: CellState) => {
+      cycleCell(r, c, false)
+      sound.playSound(currentState === 0 ? 'cell-fill' : 'cell-clear')
+    },
+    [cycleCell, sound]
+  )
+
+  const handleCellRightClick = useCallback(
+    (r: number, c: number, currentState: CellState) => {
+      cycleCell(r, c, true)
+      sound.playSound(currentState === 0 ? 'cell-mark' : 'cell-clear')
+    },
+    [cycleCell, sound]
+  )
+
+  const handleUndo = useCallback(() => {
+    if (!canUndo) return
+    sound.playSound('cell-clear')
+    undo()
+  }, [canUndo, undo, sound])
+
+  const handleRedo = useCallback(() => {
+    if (!canRedo) return
+    sound.playSound('cell-fill')
+    redo()
+  }, [canRedo, redo, sound])
+
+  // Keyboard shortcuts: Ctrl+Z = undo, Ctrl+Shift+Z / Ctrl+Y = redo
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const ctrl = e.ctrlKey || e.metaKey
+      if (!ctrl) return
+      if (e.key === 'z' && !e.shiftKey) { e.preventDefault(); handleUndo() }
+      if ((e.key === 'z' && e.shiftKey) || e.key === 'y') { e.preventDefault(); handleRedo() }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [handleUndo, handleRedo])
+
+  const handleReveal = useCallback(() => {
+    sound.playSound('button-click')
+    const hasMistakes =
+      rowFilled.some((filled, i) => filled > puzzle.rowCounts[i]) ||
+      colFilled.some((filled, i) => filled > puzzle.colCounts[i])
+    revealMistakes()
+    if (hasMistakes) setTimeout(() => sound.playSound('error'), 100)
+  }, [sound, rowFilled, colFilled, puzzle, revealMistakes])
+
+  const handleReset = useCallback(() => {
+    sound.playSound('button-click')
+    resetBoard()
+  }, [sound, resetBoard])
+
+  const handleChangeDifficulty = useCallback(
+    (d: DifficultyKey) => {
+      sound.playSound('button-click')
+      updateDifficulty(d)
+    },
+    [sound, updateDifficulty]
+  )
+
+  const handleOpenSettings = useCallback(() => {
+    sound.playSound('modal-open')
+    setSettingsOpen(true)
+  }, [sound])
+
+  // ── Render ───────────────────────────────────────────────────────────────────
 
   return (
-    <div className="min-h-screen flex flex-col items-center px-4 py-6">
-      <header className="w-full max-w-5xl flex items-center justify-between mb-4 gap-4">
-        <div>
-          <h1 className="text-2xl md:text-3xl font-semibold">Hidden Grid <span className="text-xs opacity-60 align-top">v1.3 RC</span></h1>
-          <div className="text-xs opacity-70 mt-1">Title: {title} {streak.current > 0 ? <span className="ml-2">• Streak 🔥 {streak.current}</span> : null}</div>
-        </div>
-        <XpBar level={level.level} into={level.intoLevel} next={level.nextLevelXP} />
-      </header>
+    <div className="min-h-[100dvh] flex flex-col items-center px-1 md:px-6 lg:px-8 py-4 md:py-6">
+
+      <GameHeader
+        title={title}
+        streak={streak}
+        level={level.level}
+        xpInto={level.intoLevel}
+        xpNext={level.nextLevelXP}
+        onReturnToMenu={onReturnToMenu}
+        onOpenSettings={handleOpenSettings}
+      />
 
       <main className="w-full max-w-5xl grid grid-cols-1 md:grid-cols-[1fr_360px] lg:grid-cols-[1fr_400px] gap-6">
-        <section className={panelClass}>
-          <div className="flex items-end gap-4 mb-3">
-            <div className="w-10" />
-            <div className="grid" style={{ gridTemplateColumns: `repeat(${puzzle.size}, 36px)` }}>
-              {puzzle.colCounts.map((n, i) => (
-                <div key={i} className={`text-center text-xs px-1 ${colFilled[i] === n ? 'text-emerald-400' : 'text-neutral-400'}`}>{n}</div>
-              ))}
-            </div>
-          </div>
-          <div className="flex">
-            <div className="flex flex-col mr-2 gap-1">
-              {puzzle.rowCounts.map((n, i) => (
-                <div key={i} className={`h-9 w-10 flex items-center justify-center text-xs ${rowFilled[i] === n ? 'text-emerald-400' : 'text-neutral-400'}`}>{n}</div>
-              ))}
-            </div>
-            <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${puzzle.size}, 36px)` }}>
-              {grid.map((row, r) => row.map((cell, c) => (
-                <button key={`${r}-${c}`} onClick={() => cycleCell(r, c, false)} onContextMenu={(e) => { e.preventDefault(); cycleCell(r, c, true) }}
-                  className={`h-9 w-9 rounded-md border flex items-center justify-center select-none transition-colors ${cell === 1 ? 'bg-emerald-500/90 text-neutral-900' : cell === 2 ? 'bg-neutral-800 text-neutral-400' : 'bg-neutral-900 hover:bg-neutral-800'}`}
-                  aria-label={`cell ${r + 1},${c + 1}`}
-                >{cell === 1 ? '' : cell === 2 ? '✖' : ''}</button>
-              )))}
-            </div>
-          </div>
-          <div className="mt-4 flex flex-wrap items-center gap-2 text-sm">
-            <button onClick={revealMistakes} className="btn btn-neutral border-accent">Reveal mistakes</button>
-            <button onClick={() => setGrid(Array.from({ length: cfg.size }, () => Array(cfg.size).fill(0)))} className="btn btn-neutral border-accent">Reset board</button>
-            {settings.showTimer !== false && (
-              <span className="ml-auto opacity-80">Time: <span className="font-mono">{Math.floor(secondsElapsed / 60)}:{String(secondsElapsed % 60).padStart(2, '0')}</span></span>
-            )}
-          </div>
+
+        {/* Grid panel */}
+        <section className="panel border border-accent">
+          <GameBoard
+            puzzle={puzzle}
+            grid={grid}
+            rowFilled={rowFilled}
+            colFilled={colFilled}
+            hideCountsUntilComplete={cfg.hideCountsUntilComplete ?? false}
+            completedRows={completedRows}
+            completedCols={completedCols}
+            puzzleComplete={puzzleComplete}
+            onCellClick={handleCellClick}
+            onCellRightClick={handleCellRightClick}
+          />
+          <GameControls
+            onUndo={handleUndo}
+            onRedo={handleRedo}
+            onReveal={handleReveal}
+            onReset={handleReset}
+            canUndo={canUndo}
+            canRedo={canRedo}
+            seconds={secondsElapsed}
+            showTimer={settings.showTimer !== false}
+          />
         </section>
 
-        <aside className={panelClass + ' flex flex-col gap-3'}>
-          <h2 className="text-lg font-semibold">Mode & Difficulty</h2>
-          <div className="flex gap-2 flex-wrap">
-            <button
-              onClick={newDaily}
-              className="btn btn-neutral border-accent px-2 py-1 text-xs leading-none whitespace-nowrap"
-            >
-              Daily
-            </button>
-            <button
-              onClick={newPractice}
-              className="btn btn-neutral border-accent px-2 py-1 text-xs leading-none whitespace-nowrap"
-            >
-              Practice
-            </button>
-          </div>
-          <div className="mt-1">
-            <label className="text-sm opacity-80">Difficulty</label>
-            <div className="flex gap-2 mt-1 flex-wrap">
-              {(['beginner','medium','hard'] as Difficulty[]).map(d => (
-                <button key={d} onClick={() => { setDifficulty(d); setSeed(`${mode}-${todayKey()}-${d}`) }} className="btn btn-neutral border-accent capitalize px-2 py-1 text-xs leading-none whitespace-nowrap">{d}</button>
-              ))}
-            </div>
-            <div className="text-xs opacity-60 mt-1">Reveals allowed: {cfg.revealsAllowed < 0 ? 'unlimited' : cfg.revealsAllowed}</div>
-          </div>
-          <div className="flex gap-2 mt-3">
-            <button onClick={() => setShowStats(s => !s)} className="btn btn-neutral border-accent">{showStats ? 'Hide Stats' : 'Show Stats'}</button>
-            <button onClick={() => setSettingsOpen(true)} className="btn btn-neutral border-accent">Settings</button>
-          </div>
-          {showStats && <div className="mt-3"><StatsPanel stats={profile.get().stats} /></div>}
-          <div className="mt-2 text-sm opacity-90">
-            <p><span className="font-semibold">How to play:</span> Fill cells so each row/column matches the green number. Right-click (or long-press) to mark empty (✖). Finish faster for better medals.</p>
-          </div>
-          <div className="mt-2 text-sm opacity-80">
-            <div>Total moves: <span className="font-mono">{moves}</span></div>
-            <div>Seed: <span className="font-mono">{puzzle.id}</span></div>
-          </div>
+        {/* Sidebar — hidden on mobile, visible on md+ */}
+        <aside className="hidden md:block panel border border-accent">
+          <GameSidebar
+            difficulty={difficulty}
+            revealsAllowed={cfg.revealsAllowed}
+            moves={moves}
+            seedId={puzzle.id}
+            onChangeDifficulty={handleChangeDifficulty}
+          />
         </aside>
       </main>
-      <footer className="mt-6 text-xs opacity-60">© {new Date().getFullYear()} Hidden Grid · v1.3 RC</footer>
-      <CompletionModal open={modalOpen} onClose={() => { setModalOpen(false); mode === 'daily' ? newDaily() : newPractice() }} seconds={lastResult?.seconds ?? Math.floor((Date.now() - startTime) / 1000)} medal={lastResult?.medal ?? 'none'} gainedXP={lastResult?.gainedXP ?? 0} levelUp={lastResult?.levelUp ?? null} dailyBonus={lastResult?.dailyBonus} newlyUnlocked={lastResult?.newlyUnlocked} />
-      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} settings={profile.get().settings} onChange={(next) => profile.setSettings(next)} />
+
+      <footer className="mt-xl text-xs text-text-secondary">
+        © 2026 RABID NYC
+      </footer>
+
+      <CompletionModal
+        open={completion.isOpen}
+        onPlayAgain={() => {
+          sound.playSound('modal-close')
+          completion.closeModal()
+          // Picture mode: reset the same puzzle. Practice mode: generate new one.
+          if (initialPicture) resetBoard()
+          else startNewPuzzle()
+        }}
+        onReturnToMenu={() => {
+          sound.playSound('modal-close')
+          completion.closeModal()
+          onReturnToMenu?.()
+        }}
+        seconds={completion.result?.seconds ?? 0}
+        medal={completion.result?.medal ?? 'none'}
+        gainedXP={completion.result?.gainedXP ?? 0}
+        levelUp={completion.result?.levelUp ?? null}
+        newlyUnlocked={completion.result?.newlyUnlocked}
+        soundEnabled={soundEnabled}
+        picture={initialPicture}
+      />
+
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => {
+          sound.playSound('modal-close')
+          setSettingsOpen(false)
+        }}
+        settings={profile.get().settings}
+        onChange={(next) => profile.setSettings(next)}
+      />
+
+      <ParticleEffect trigger={showParticles} count={30} />
     </div>
   )
 }

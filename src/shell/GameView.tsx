@@ -1,12 +1,27 @@
+/**
+ * GameView
+ *
+ * Thin wrapper that mounts App inside the Shell navigation context.
+ * Supports both practice mode (difficulty only) and picture mode
+ * (a specific PuzzlePicture passed as initialPicture).
+ */
+
 import App from '../App'
-export default function GameView(props: { theme: 'retro'|'zen'; mode: 'daily'|'practice'; onExit: ()=>void }) {
+import type { DifficultyKey } from '../lib/progression'
+import type { PuzzlePicture } from '../lib/puzzlePictures'
+
+interface GameViewProps {
+  difficulty: DifficultyKey
+  picture?: PuzzlePicture   // present in picture mode, absent in practice mode
+  onExit: () => void
+}
+
+export default function GameView({ difficulty, picture, onExit }: GameViewProps) {
   return (
-    <div className="min-h-screen flex flex-col">
-      <div className="w-full max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-        <button className="btn btn-neutral border-accent" onClick={props.onExit}>← Back</button>
-        <div className="text-sm opacity-80">Theme: {props.theme} • Mode: {props.mode}</div>
-      </div>
-      <App />
-    </div>
+    <App
+      initialDifficultyOverride={difficulty}
+      initialPicture={picture}
+      onReturnToMenu={onExit}
+    />
   )
 }

@@ -1,9 +1,23 @@
-export type Difficulty = 'beginner' | 'medium' | 'hard'
-export const DIFFICULTY_CONFIG = {
-  beginner: { size: 6, density: 0.45, revealsAllowed: -1, parTimes: { bronze: 300, silver: 180, gold: 120 }, multiplier: 1.0 },
-  medium:   { size: 8, density: 0.50, revealsAllowed: 1,  parTimes: { bronze: 420, silver: 300, gold: 180 }, multiplier: 1.5 },
-  hard:     { size: 10, density: 0.55, revealsAllowed: 0,  parTimes: { bronze: 540, silver: 420, gold: 300 }, multiplier: 2.0 },
-} as const
+import { DEFAULT_PUZZLE_DENSITY, PERFECT_SOLVE_BONUS, TIME_BONUS_MIN, TIME_BONUS_MAX } from './constants'
+
+export type DifficultyConfig = {
+  size: number
+  density: number
+  revealsAllowed: number
+  parTimes: { bronze: number; silver: number; gold: number }
+  multiplier: number
+  hideCountsUntilComplete?: boolean
+}
+
+export type Difficulty = 'flash' | 'easy' | 'medium' | 'hard' | 'expert' | 'insane'
+export const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
+  flash:   { size: 4,  density: DEFAULT_PUZZLE_DENSITY, revealsAllowed: -1, parTimes: { bronze: 180,  silver: 120, gold: 60 },  multiplier: 0.5 },
+  easy:    { size: 6,  density: DEFAULT_PUZZLE_DENSITY, revealsAllowed: -1, parTimes: { bronze: 300,  silver: 180, gold: 120 }, multiplier: 1.0 },
+  medium:  { size: 8,  density: 0.50,                  revealsAllowed: 1,  parTimes: { bronze: 420,  silver: 300, gold: 180 }, multiplier: 1.5 },
+  hard:    { size: 10, density: 0.55,                  revealsAllowed: 0,  parTimes: { bronze: 540,  silver: 420, gold: 300 }, multiplier: 2.0 },
+  expert:  { size: 15, density: 0.60,                  revealsAllowed: 0,  parTimes: { bronze: 1200, silver: 900, gold: 600 }, multiplier: 3.0 },
+  insane:  { size: 15, density: 0.60,                  revealsAllowed: 0,  parTimes: { bronze: 1200, silver: 900, gold: 600 }, multiplier: 3.0, hideCountsUntilComplete: true },
+}
 export type Medal = 'none' | 'bronze' | 'silver' | 'gold'
 export type DifficultyKey = keyof typeof DIFFICULTY_CONFIG
 export function computeMedal(difficulty: DifficultyKey, seconds: number): Medal {
@@ -20,8 +34,8 @@ export function computeXP(params: { size: number; difficulty: DifficultyKey; sec
   const base = baseXP(size)
   const mult = DIFFICULTY_CONFIG[difficulty].multiplier
   const par = DIFFICULTY_CONFIG[difficulty].parTimes.silver
-  const timeBonus = clamp(par / Math.max(seconds, 1), 0.5, 1.5)
-  const accBonus = perfect ? 1.25 : 1.0
+  const timeBonus = clamp(par / Math.max(seconds, 1), TIME_BONUS_MIN, TIME_BONUS_MAX)
+  const accBonus = perfect ? PERFECT_SOLVE_BONUS : 1.0
   return Math.round(base * mult * timeBonus * accBonus)
 }
 export function xpForLevel(level: number): number {

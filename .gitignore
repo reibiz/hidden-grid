@@ -5,3 +5,6 @@ dist
 .env
 npm-debug.log*
 vercel
+.claude/
+tsconfig.tsbuildinfo
+Untitled
